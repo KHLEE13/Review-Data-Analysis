@@ -1,0 +1,276 @@
+---
+title: "Review Data Analysis"
+author: "KHLEE"
+date: '2022 2 2 '
+output: html_document
+---
+
+```{r setup, message=FALSE, comment=NA, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(tidytext) 
+library(tidyverse)
+library(SnowballC)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(widyr)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(tm)
+library(arules)
+library(KoNLP)
+library(knitr)
+library(viridis)
+library(topicmodels)
+```
+
+
+```{r data merging}
+rm(list=ls())
+src_file <- list.files(src_dir)
+src_file
+ 
+final_file <- data.frame()
+for (i in 1:length(src_file)){
+        file_name <- src_file[i]
+        text_file <- readLines(con=file_name)
+        text_file <-  paste(text_file, collapse=" ")
+        temp_file <- data.frame(name=file_name, text=text_file)
+        final_file <- rbind(final_file, temp_file)
+    }
+
+final_file$name <- gsub("\\.txt", "", final_file$name)
+final_file$name <- gsub("\\[.*\\]", "", final_file$name)
+final_file$name <- gsub("\\(.*\\)", "", final_file$name)
+```
+
+
+```{r descriptive}
+summary(nchar(final_file$text)) 
+
+ggplot(final_file, aes(x=nchar(text))) +
+    geom_histogram(color='brown', fill="coral") +
+    labs(x="Review Length (Number of Review Characters)", y="Frequency",
+         title="Review",
+         subtitle="Distribution of length",
+         Caption="Source: Naver Cafe") +
+    theme(plot.title=element_text(face="bold"),
+          axis.text=element_text(face="bold"))
+```
+
+```{r processing}
+final_file$age <- str_match(final_file$text, pattern="\\d+세|\\d+살|\\d+대")
+sum(!is.na(final_file$age)) 
+final_file$age_cat <- as.numeric(gsub("세|살|대", "", final_file$age)) 
+final_file$age_cat <- ifelse(final_file$age_cat >= 40, "40세 이상", 
+                             ifelse(final_file$age_cat >= 30, "30대",
+                                    ifelse(final_file$age_cat >= 20, "20대", NA)))
+age_df <- cbind(final_file$age, final_file$age_cat)
+head(age_df)
+```
+
+```{r processing2}
+text_tb <- final_file %>%
+    as_tibble() %>%
+    print() %>%
+    unnest_tokens(output=word, input=text)
+
+dic <- data.frame(terms=c("단어A", "단어B", "단어C", "단어D"))
+
+merged_file <- text_tb %>% 
+    filter(word %in% dic$terms) %>% 
+    count(name, word, sort=TRUE, name="count") %>% 
+    arrange(name) %>% 
+    print(n=50)
+```
+
+```{r association rule}
+dtm <- merged_file %>%
+    cast_dtm(document=name, term=word, value=count)
+dtm.mat <- as.matrix(dtm)
+dtm.mat <- ifelse(dtm.mat > 0, 1, 0)
+
+trans <- as(dtm.mat, 
+            "transactions")
+arules::inspect(trans[1:20])
+
+rules <- apriori(trans, 
+                 parameter = list(supp = 0.01, 
+                                  conf = 0.01, 
+                                  target = "rules"))
+arules::inspect(head(sort(rules, by = "lift")), n=30)
+```
+
+```{r text analysis}
+text <- final_file$text
+text <- text %>%
+    str_replace_all("[ㄱ-ㅣ]", "") %>% 
+    str_replace_all("[[:punct:]]", "") %>% 
+    str_replace_all("[[:digit:]]", "") %>% 
+    str_trim()
+
+buildDictionary(ext_dic=c("sejong", "woorimalsam", "insighter")) 
+review.words <- SimplePos09(text) 
+review.words <- str_match_all(review.words, pattern="([가-힣]+)/[N]") 
+review.words <- sapply(review.words,
+                     function(x) x[,2][str_length(x[,2]) >= 2]) 
+review.words <- unlist(review.words)
+
+wordfreq <- sort(table(review.words), decreasing=TRUE)
+wordfreq.df <- data.frame(word=names(wordfreq), frequency=wordfreq)
+wordfreq.df <- wordfreq.df[, c(1,3)]
+colnames(wordfreq.df) <- c("word", "frequency")
+
+wordfreq.df %>% 
+    top_n(30, frequency) %>% 
+    ggplot(aes(x=reorder(word, frequency), y=frequency)) +
+    geom_bar(stat="identity", color='brown', fill= "coral") +
+    labs(x="Word", y="Frequency",
+         title="Review",
+         subtitle="Frequency Analysis",
+         Caption="Source: Naver Cafe") +
+    theme(plot.title=element_text(face="bold"),
+          axis.text=element_text(face="bold")) +
+    coord_flip()
+
+text_tb %>%
+    filter(word %in% wordfreq.df$word) %>%
+    filter(!is.na(age_cat)) %>%
+    count(age_cat, word, name="count") %>%
+    group_by(age_cat) %>% 
+    top_n(20, wt=count) %>% 
+    ungroup() %>%
+    arrange(age_cat, -count) %>% 
+    ggplot(aes(reorder_within(word, count, age_cat), count, fill=age_cat)) +
+    geom_col(show.legend=FALSE) +
+    facet_wrap(~age_cat, ncol=3, scales="free") +
+    scale_fill_viridis(end=0.75, discrete=TRUE, direction=-1, option="plasma") +
+    theme_minimal() +
+    scale_x_reordered() +
+    labs(x=NULL, y="Term Frequency", title="Review",
+         subtitle="연령대에 따른 상위 단어 빈도",
+         caption="출처: Naver Cafe") +
+    coord_flip() +
+    theme(strip.text.x=element_text(face="bold"),
+          panel.grid.major.x=element_blank(),
+          panel.grid.minor.x=element_blank(),
+          plot.title=element_text(face="bold", size=18),
+          plot.subtitle=element_text(size=15),
+          plot.caption=element_text(size=12),
+          axis.title=element_text(size=15))
+```
+
+```{r tf-idf}
+merged_file_tfidf <- text_tb %>%
+    filter(word %in% wordfreq.df$word) %>%
+    filter(!is.na(age_cat)) %>%
+    count(age_cat, word, name="count") %>%
+    ungroup() %>%
+    bind_tf_idf(term=word, document=age_cat, n=count)
+
+merged_file_tfidf %>% 
+    arrange(desc(tf_idf)) %>% 
+    group_by(age_cat) %>% 
+    top_n(20, wt=tf_idf) %>% 
+    ungroup() %>% 
+    ggplot(aes(reorder_within(word, tf_idf, age_cat), tf_idf, fill=age_cat)) +
+    geom_col(show.legend=FALSE) +
+    scale_fill_viridis(end=0.75, discrete=TRUE, direction=-1, option="plasma") +
+    facet_wrap(~age_cat, ncol=3, scales="free") +
+    theme_minimal() +
+    scale_x_reordered() +
+    labs(x=NULL, y="Term Frequency-Inverse Documnet Frequency") +
+    coord_flip()
+
+merged_file_tfidf %>%
+    filter(tf_idf > median(tf_idf)) %>% 
+    group_by(age_cat) %>% 
+    top_n(20, wt=count) %>% 
+    ungroup() %>%
+    arrange(age_cat, -count) %>% 
+    ggplot(aes(reorder_within(word, count, age_cat), count, fill=age_cat)) +
+    geom_col(show.legend=FALSE) +
+    facet_wrap(~age_cat, ncol=3, scales="free") +
+    scale_fill_viridis(end=0.75, discrete=TRUE, direction=-1, option="plasma") +
+    theme_minimal() +
+    scale_x_reordered() +
+    labs(x=NULL, y="Term Frequency", title="Review",
+         subtitle="연령대에 따른 상위 단어 빈도 (TF-IDF 중위수 이상)",
+         caption="출처: Naver Cafe") +
+    coord_flip() +
+    theme(strip.text.x=element_text(face="bold"),
+          panel.grid.major.x=element_blank(),
+          panel.grid.minor.x=element_blank(),
+          plot.title=element_text(face="bold", size=18),
+          plot.subtitle=element_text(size=15),
+          plot.caption=element_text(size=12),
+          axis.title=element_text(size=15))
+```
+
+```{r topic modeling}
+dtm <- text_tb %>%
+    filter(word %in% wordfreq.df$word) %>%
+    count(name, word, name="count") %>% 
+    cast_dtm(document=name, term=word, value=count)
+
+doc.lda <- LDA(dtm, method="Gibbs", k=3, control=list(seed=123)) 
+topics(doc.lda)[1:12]
+
+doc.term <- tidy(doc.lda, matrix="beta")
+doc.term.top <- doc.term %>% 
+    group_by(topic) %>% 
+    top_n(15, beta) %>% 
+    ungroup() %>% 
+    arrange(topic, -beta)
+
+ggplot(doc.term.top, aes(reorder_within(term, beta, topic), beta, fill=factor(topic))) +
+    geom_bar(stat="identity", show.legend=FALSE) +
+    facet_wrap(~paste("토픽", topic), scales="free") +
+    scale_fill_viridis(end=0.75, discrete=TRUE, direction=-1, option="plasma") +
+    coord_flip() +
+    theme_minimal() +
+    scale_x_reordered() +
+    labs(x="단어", y="베타", title="Review",
+         subtitle="토픽별 상위 15개 단어의 베타값(개별 토픽으로부터 각 단어가 생성될 확률)",
+         caption="출처: Naver Cafe") +
+    theme(strip.text.x=element_text(face="bold"),
+          panel.grid.major.x=element_blank(),
+          panel.grid.minor.x=element_blank(),
+          plot.title=element_text(face="bold", size=18),
+          plot.subtitle=element_text(size=15),
+          plot.caption=element_text(size=12),
+          axis.title=element_text(size=15))
+
+topic.num <- data.frame(name=names(topics(doc.lda)), topic=topics(doc.lda)) 
+row.names(topic.num) <- NULL
+text_df <- merge(final_file, topic.num, by="name", all=TRUE)
+text_df2 <- text_df %>%
+    filter(!is.na(age_cat))
+
+text_df2$topic <- paste0(text_df2$topic, "번 유형")
+text_df2$topic <- as.factor(text_df2$topic)
+text_df2$age_cat <- as.factor(text_df2$age_cat) 
+
+table(text_df2$topic)
+table(text_df2$age_cat)
+table(text_df2$age_cat, text_df2$topic)
+
+text_df2 %>% 
+    ggplot(aes(x=topic, fill=age_cat)) +
+    geom_bar(position="dodge") +
+    scale_fill_viridis(end=0.75, discrete=TRUE, direction=-1, option="plasma") +
+    theme_minimal() +
+    labs(x="사용자 유형", y="빈도", title="Review",
+         subtitle="연령에 따른 사용자 유형",
+         caption="출처: Naver Cafe",
+         fill="연령대") +
+    theme(strip.text.x=element_text(face="bold"),
+          panel.grid.major.x=element_blank(),
+          panel.grid.minor.x=element_blank(),
+          plot.title=element_text(face="bold", size=18),
+          plot.subtitle=element_text(size=15),
+          plot.caption=element_text(size=12),
+          axis.title=element_text(size=15))
+```
